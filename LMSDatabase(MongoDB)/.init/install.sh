@@ -1,42 +1,40 @@
 #!/usr/bin/env bash
 set -euo pipefail
-WORKSPACE=${WORKSPACE:-/home/kavia/workspace/code-generation/lms_dt3-307785-309186/LMSDatabase(MongoDB)}
-# create data dir and set ownership to mongod/mongodb if present
-sudo mkdir -p /data/db
-MONGOD_USER=""
-if id -u mongod >/dev/null 2>&1; then MONGOD_USER=mongod; elif id -u mongodb >/dev/null 2>&1; then MONGOD_USER=mongodb; fi
-if [ -n "${MONGOD_USER}" ]; then sudo chown -R "${MONGOD_USER}:${MONGOD_USER}" /data/db; else sudo chown -R "$(id -u):$(id -g)" /data/db; fi
-sudo chmod 700 /data/db
-# check for lockfiles
-if [ -e /data/db/WiredTiger.lock ] || [ -e /data/db/mongod.lock ]; then
-  if [ "${DEV_FORCE_REUSE:-0}" != "1" ]; then echo "ERROR: /data/db contains mongod lock file; set DEV_FORCE_REUSE=1 to proceed with existing DB files" >&2; exit 4; fi
+WS="/home/kavia/workspace-code-generation/lms_dt3-307785-309186/LMSDatabase(MongoDB)"
+sudo mkdir -p "$WS" >/dev/null
+# detect mongo client
+MONGO_CLI=""
+if command -v mongosh >/dev/null 2>&1; then MONGO_CLI=$(command -v mongosh)
+elif command -v mongo >/dev/null 2>&1; then MONGO_CLI=$(command -v mongo)
 fi
-# detect running mongod
-if [ -f /var/run/mongodb/mongod.pid ]; then PID=$(cat /var/run/mongodb/mongod.pid 2>/dev/null || true); fi
-if pgrep -f '[m]ongod' >/dev/null 2>&1 || ( [ -n "${PID:-}" ] && kill -0 "$PID" >/dev/null 2>&1 ); then
-  echo "INFO: mongod process already present; set DEV_FORCE_REUSE=1 to reuse" >&2
+if [ -n "$MONGO_CLI" ]; then
+  # print version if possible
+  "$MONGO_CLI" --version 2>/dev/null || true
 fi
-# verify mongod and shell
-if ! command -v mongod >/dev/null 2>&1; then echo "ERROR: mongod not found in PATH" >&2; exit 2; fi
-if command -v mongosh >/dev/null 2>&1; then MONGO_SHELL="mongosh"; elif command -v mongo >/dev/null 2>&1; then MONGO_SHELL="mongo"; else echo "ERROR: mongosh/mongo not found" >&2; exit 3; fi
-# write workspace-local env (do not change workspace dir permissions to avoid failures)
-mkdir -p "$WORKSPACE" || true
-# write .mongo_env with restrictive perms; avoid trying to chmod workspace directory itself
-TMP_ENV=$(mktemp)
-cat > "$TMP_ENV" <<EOF
-MONGO_INITDB_DATABASE=lmstest
-MONGO_SHELL=${MONGO_SHELL}
-# DEV_ALLOW_NETWORK=1 to bind 0.0.0.0; DEV_FORCE_REUSE=1 to reuse existing mongod or DB files
+# ensure mongodump available (install tools only if missing)
+if ! command -v mongodump >/dev/null 2>&1; then
+  # attempt to install mongodb-org-tools non-interactively; tolerates apt failure
+  if sudo apt-get update -q >/dev/null 2>&1 && sudo apt-get install -y -q mongodb-org-tools >/dev/null 2>&1; then
+    command -v mongodump >/dev/null 2>&1 || true
+  else
+    echo "WARNING: cannot install mongodb-org-tools (apt failed)" >&2
+  fi
+fi
+# write profile only if absent to avoid overwriting user settings
+PROFILE=/etc/profile.d/mongo-env.sh
+if [ ! -f "$PROFILE" ]; then
+  sudo tee "$PROFILE" >/dev/null <<'EOF'
+# dev-only Mongo defaults (override in your env)
+export MONGO_INITDB_ROOT_USERNAME="${MONGO_INITDB_ROOT_USERNAME:-admin}"
+export MONGO_INITDB_ROOT_PASSWORD="${MONGO_INITDB_ROOT_PASSWORD:-adminpass}"
+export MONGO_DEV_USER="${MONGO_DEV_USER:-lms_dev}"
+export MONGO_DEV_PASS="${MONGO_DEV_PASS:-devpass}"
+# path to mongo client; preserved if MONGO_CLI already set in environment
+export MONGO_CLI="${MONGO_CLI:-$(command -v mongosh || command -v mongo || true)}"
 EOF
-chmod 600 "$TMP_ENV"
-mv -f "$TMP_ENV" "$WORKSPACE/.mongo_env"
-# persist lightweight non-secret globals for interactive shells
-PROFILE=/etc/profile.d/lms_mongo.sh
-sudo bash -c "cat > ${PROFILE} <<'P'
-# LMS mongo workspace helpers (non-secret)
-export LMS_WORKSPACE=\"${WORKSPACE}\"
-export MONGO_SHELL=\"${MONGO_SHELL}\"
-P
-" && sudo chmod 644 "$PROFILE"
-# summary
-echo "Wrote $WORKSPACE/.mongo_env and $PROFILE"
+  sudo chmod 644 "$PROFILE"
+fi
+# export detected MONGO_CLI for current shell session as well
+if [ -n "${MONGO_CLI:-}" ]; then
+  export MONGO_CLI
+fi
